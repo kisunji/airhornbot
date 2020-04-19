@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/binary"
-	"flag"
 	"fmt"
 	"io"
 	"math/rand"
@@ -491,11 +490,7 @@ func onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 func main() {
-	var (
-		Token = flag.String("t", "", "Discord Authentication Token")
-		err   error
-	)
-	flag.Parse()
+	token := os.Getenv("BOT_TOKEN")
 
 	// Preload all the sounds
 	log.Info("Preloading sounds...")
@@ -505,7 +500,7 @@ func main() {
 
 	// Create a discord session
 	log.Info("Starting discord session...")
-	discord, err = discordgo.New(*Token)
+	discord, err := discordgo.New(token)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"error": err,
@@ -514,8 +509,6 @@ func main() {
 	}
 
 	discord.ShardCount = 1
-
-	discord.ShouldReconnectOnError = true
 
 	discord.AddHandler(onReady)
 	discord.AddHandler(onMessageCreate)
@@ -536,4 +529,6 @@ func main() {
 	signal.Notify(c, os.Interrupt, os.Kill)
 	<-c
 	log.Info("AIRHORNBOT exiting")
+
+	discord.Close()
 }
