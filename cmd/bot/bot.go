@@ -185,6 +185,20 @@ var WOW = &SoundCollection{
 	},
 }
 
+var OKBUDDY = &SoundCollection{
+	Prefix: "okbuddy",
+	Commands: []string {
+		"!okbuddy",
+		"!okaybuddy",
+		"!okb",
+	},
+	Sounds: []*Sound{
+		createSound("1", 50, 250),
+		createSound("2", 50, 250),
+		createSound("3", 50, 250),
+	},
+}
+
 var COLLECTIONS = []*SoundCollection{
 	AIRHORN,
 	KHALED,
@@ -193,6 +207,7 @@ var COLLECTIONS = []*SoundCollection{
 	COW,
 	BIRTHDAY,
 	WOW,
+	OKBUDDY,
 }
 
 // Create a Sound struct
@@ -414,7 +429,7 @@ func playSound(play *Play, vc *discordgo.VoiceConnection) (err error) {
 
 func onReady(s *discordgo.Session, event *discordgo.Ready) {
 	log.Info("Recieved READY payload")
-	s.UpdateStatus(0, "airhornbot.com")
+	s.UpdateStatus(0, "!okbuddy")
 }
 
 func scontains(key string, options ...string) bool {
@@ -583,4 +598,5 @@ func main() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, os.Kill)
 	<-c
+	log.Info("AIRHORNBOT exiting")
 }
