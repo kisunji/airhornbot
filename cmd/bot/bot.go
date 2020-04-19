@@ -357,6 +357,7 @@ func enqueuePlay(user *discordgo.User, guild *discordgo.Guild, coll *SoundCollec
 
 	m.Lock()
 	if queue, ok := queues[guild.ID]; ok {
+		log.Printf("queue size : %v", len(queue))
 		if len(queue) < MAX_QUEUE_SIZE {
 			queues[guild.ID] = append(queue, play)
 		}
@@ -369,6 +370,7 @@ func enqueuePlay(user *discordgo.User, guild *discordgo.Guild, coll *SoundCollec
 
 func runPlayer(guildId string) {
 	var vc *discordgo.VoiceConnection
+
 	for {
 		m.Lock()
 		var play *Play
@@ -377,12 +379,15 @@ func runPlayer(guildId string) {
 			play = queue[0]
 			queues[guildId] = queue[1:]
 		} else {
+			m.Unlock()
 			break
 		}
 		m.Unlock()
 
+
 		// If we need to change channels, do that now
 		if vc != nil && vc.ChannelID != play.ChannelID {
+			log.Print("changing channel")
 			vc.ChangeChannel(play.ChannelID, false, false)
 			time.Sleep(time.Millisecond * 125)
 		}
@@ -391,6 +396,7 @@ func runPlayer(guildId string) {
 		vc, err = playSound(play, vc)
 		if err != nil {
 			log.Println(err)
+			return
 		}
 	}
 	if vc != nil {
@@ -398,20 +404,17 @@ func runPlayer(guildId string) {
 	}
 
 	delete(queues, guildId)
-	m.Unlock()
 }
 
 // Play a sound
 func playSound(play *Play, vc *discordgo.VoiceConnection) (*discordgo.VoiceConnection, error) {
-	if vc == nil || !vc.Ready {
+	if vc == nil {
 		var err error
 		vc, err = discord.ChannelVoiceJoin(play.GuildID, play.ChannelID, false, true)
 		if err != nil {
-			return nil, err
+			return vc, err
 		}
 	}
-
-	time.Sleep(time.Millisecond * 32)
 
 	play.Sound.Play(vc)
 
@@ -500,7 +503,8 @@ func main() {
 
 	// Create a discord session
 	log.Info("Starting discord session...")
-	discord, err := discordgo.New(token)
+	var err error
+	discord, err = discordgo.New(token)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"error": err,
@@ -509,7 +513,7 @@ func main() {
 	}
 
 	discord.ShardCount = 1
-
+	discord.ShouldReconnectOnError = true
 	discord.AddHandler(onReady)
 	discord.AddHandler(onMessageCreate)
 
@@ -529,6 +533,4 @@ func main() {
 	signal.Notify(c, os.Interrupt, os.Kill)
 	<-c
 	log.Info("AIRHORNBOT exiting")
-
-	discord.Close()
 }
