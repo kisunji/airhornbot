@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -9,14 +8,11 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
-	"runtime"
-	"strconv"
 	"strings"
-	"text/tabwriter"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/dustin/go-humanize"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -25,19 +21,17 @@ var (
 	discord *discordgo.Session
 
 	// Map of Guild id's to *Play channels, used for queuing and rate-limiting guilds
-	queues = make(map[string]chan *Play)
+	queues = make(map[string][]*Play)
 
 	MAX_QUEUE_SIZE = 6
 
-	// Owner
-	OWNER string
+	m sync.Mutex
 )
 
 // Play represents an individual use of the !airhorn command
 type Play struct {
 	GuildID   string
 	ChannelID string
-	UserID    string
 	Sound     *Sound
 
 	// The next play to occur after this, only used for chaining sounds like anotha
@@ -187,7 +181,7 @@ var WOW = &SoundCollection{
 
 var OKBUDDY = &SoundCollection{
 	Prefix: "okbuddy",
-	Commands: []string {
+	Commands: []string{
 		"!okbuddy",
 		"!okaybuddy",
 		"!okb",
@@ -332,7 +326,6 @@ func createPlay(user *discordgo.User, guild *discordgo.Guild, coll *SoundCollect
 	play := &Play{
 		GuildID:   guild.ID,
 		ChannelID: channel.ID,
-		UserID:    user.ID,
 		Sound:     sound,
 		Forced:    true,
 	}
@@ -348,7 +341,6 @@ func createPlay(user *discordgo.User, guild *discordgo.Guild, coll *SoundCollect
 		play.Next = &Play{
 			GuildID:   play.GuildID,
 			ChannelID: play.ChannelID,
-			UserID:    play.UserID,
 			Sound:     coll.ChainWith.Random(),
 			Forced:    play.Forced,
 		}
@@ -364,48 +356,64 @@ func enqueuePlay(user *discordgo.User, guild *discordgo.Guild, coll *SoundCollec
 		return
 	}
 
-	// Check if we already have a connection to this guild
-	//   yes, this isn't threadsafe, but its "OK" 99% of the time
-	_, exists := queues[guild.ID]
-
-	if exists {
-		if len(queues[guild.ID]) < MAX_QUEUE_SIZE {
-			queues[guild.ID] <- play
+	m.Lock()
+	if queue, ok := queues[guild.ID]; ok {
+		if len(queue) < MAX_QUEUE_SIZE {
+			queues[guild.ID] = append(queue, play)
 		}
 	} else {
-		queues[guild.ID] = make(chan *Play, MAX_QUEUE_SIZE)
-		playSound(play, nil)
+		queues[guild.ID] = []*Play{play}
+		go runPlayer(guild.ID)
 	}
+	m.Unlock()
+}
+
+func runPlayer(guildId string) {
+	var vc *discordgo.VoiceConnection
+	for {
+		m.Lock()
+		var play *Play
+
+		if queue, ok := queues[guildId]; ok && len(queue) > 0 {
+			play = queue[0]
+			queues[guildId] = queue[1:]
+		} else {
+			break
+		}
+		m.Unlock()
+
+		// If we need to change channels, do that now
+		if vc != nil && vc.ChannelID != play.ChannelID {
+			vc.ChangeChannel(play.ChannelID, false, false)
+			time.Sleep(time.Millisecond * 125)
+		}
+
+		var err error
+		vc, err = playSound(play, vc)
+		if err != nil {
+			log.Println(err)
+		}
+	}
+	if vc != nil {
+		vc.Disconnect()
+	}
+
+	delete(queues, guildId)
+	m.Unlock()
 }
 
 // Play a sound
-func playSound(play *Play, vc *discordgo.VoiceConnection) (err error) {
-	log.WithFields(log.Fields{
-		"play": play,
-	}).Info("Playing sound")
-
-	if vc == nil {
-		vc, err = discord.ChannelVoiceJoin(play.GuildID, play.ChannelID, false, false)
-		// vc.Receive = false
+func playSound(play *Play, vc *discordgo.VoiceConnection) (*discordgo.VoiceConnection, error) {
+	if vc == nil || !vc.Ready {
+		var err error
+		vc, err = discord.ChannelVoiceJoin(play.GuildID, play.ChannelID, false, true)
 		if err != nil {
-			log.WithFields(log.Fields{
-				"error": err,
-			}).Error("Failed to play sound")
-			delete(queues, play.GuildID)
-			return err
+			return nil, err
 		}
 	}
 
-	// If we need to change channels, do that now
-	if vc.ChannelID != play.ChannelID {
-		vc.ChangeChannel(play.ChannelID, false, false)
-		time.Sleep(time.Millisecond * 125)
-	}
-
-	// Sleep for a specified amount of time before playing the sound
 	time.Sleep(time.Millisecond * 32)
 
-	// Play the sound
 	play.Sound.Play(vc)
 
 	// If this is chained, play the chained sound
@@ -413,18 +421,9 @@ func playSound(play *Play, vc *discordgo.VoiceConnection) (err error) {
 		playSound(play.Next, vc)
 	}
 
-	// If there is another song in the queue, recurse and play that
-	if len(queues[play.GuildID]) > 0 {
-		play := <-queues[play.GuildID]
-		playSound(play, vc)
-		return nil
-	}
-
-	// If the queue is empty, delete it
 	time.Sleep(time.Millisecond * time.Duration(play.Sound.PartDelay))
-	delete(queues, play.GuildID)
-	vc.Disconnect()
-	return nil
+
+	return vc, nil
 }
 
 func onReady(s *discordgo.Session, event *discordgo.Ready) {
@@ -441,47 +440,12 @@ func scontains(key string, options ...string) bool {
 	return false
 }
 
-func displayBotStats(cid string) {
-	stats := runtime.MemStats{}
-	runtime.ReadMemStats(&stats)
-
-	users := 0
-	for _, guild := range discord.State.Ready.Guilds {
-		users += len(guild.Members)
-	}
-
-	w := &tabwriter.Writer{}
-	buf := &bytes.Buffer{}
-
-	w.Init(buf, 0, 4, 0, ' ', 0)
-	fmt.Fprintf(w, "```\n")
-	fmt.Fprintf(w, "Discordgo: \t%s\n", discordgo.VERSION)
-	fmt.Fprintf(w, "Go: \t%s\n", runtime.Version())
-	fmt.Fprintf(w, "Memory: \t%s / %s (%s total allocated)\n", humanize.Bytes(stats.Alloc), humanize.Bytes(stats.Sys), humanize.Bytes(stats.TotalAlloc))
-	fmt.Fprintf(w, "Tasks: \t%d\n", runtime.NumGoroutine())
-	fmt.Fprintf(w, "Servers: \t%d\n", len(discord.State.Ready.Guilds))
-	fmt.Fprintf(w, "Users: \t%d\n", users)
-	fmt.Fprintf(w, "```\n")
-	w.Flush()
-	discord.ChannelMessageSend(cid, buf.String())
-}
-
-// Handles bot operator messages, should be refactored (lmao)
-func handleBotControlMessages(s *discordgo.Session, m *discordgo.MessageCreate, parts []string, g *discordgo.Guild) {
-	if scontains(parts[1], "status") {
-		displayBotStats(m.ChannelID)
-	} else if scontains(parts[1], "aps") {
-		s.ChannelMessageSend(m.ChannelID, ":ok_hand: give me a sec m8")
-	}
-}
-
 func onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if len(m.Content) <= 0 || (m.Content[0] != '!' && len(m.Mentions) < 1) {
+	if len(m.Content) <= 0 || m.Content[0] != '!' {
 		return
 	}
 
-	msg := strings.Replace(m.ContentWithMentionsReplaced(), s.State.Ready.User.Username, "username", 1)
-	parts := strings.Split(strings.ToLower(msg), " ")
+	parts := strings.Split(strings.ToLower(m.Content), " ")
 
 	channel, _ := discord.State.Channel(m.ChannelID)
 	if channel == nil {
@@ -499,22 +463,6 @@ func onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 			"channel": channel,
 			"message": m.ID,
 		}).Warning("Failed to grab guild")
-		return
-	}
-
-	// If this is a mention, it should come from the owner (otherwise we don't care)
-	if len(m.Mentions) > 0 && m.Author.ID == OWNER && len(parts) > 0 {
-		mentioned := false
-		for _, mention := range m.Mentions {
-			mentioned = mention.ID == s.State.Ready.User.ID
-			if mentioned {
-				break
-			}
-		}
-
-		if mentioned {
-			handleBotControlMessages(s, m, parts, guild)
-		}
 		return
 	}
 
@@ -544,17 +492,10 @@ func onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 func main() {
 	var (
-		Token      = flag.String("t", "", "Discord Authentication Token")
-		Shard      = flag.String("s", "", "Shard ID")
-		ShardCount = flag.String("c", "", "Number of shards")
-		Owner      = flag.String("o", "", "Owner ID")
-		err        error
+		Token = flag.String("t", "", "Discord Authentication Token")
+		err   error
 	)
 	flag.Parse()
-
-	if *Owner != "" {
-		OWNER = *Owner
-	}
 
 	// Preload all the sounds
 	log.Info("Preloading sounds...")
@@ -572,13 +513,9 @@ func main() {
 		return
 	}
 
-	// Set sharding info
-	discord.ShardID, _ = strconv.Atoi(*Shard)
-	discord.ShardCount, _ = strconv.Atoi(*ShardCount)
+	discord.ShardCount = 1
 
-	if discord.ShardCount <= 0 {
-		discord.ShardCount = 1
-	}
+	discord.ShouldReconnectOnError = true
 
 	discord.AddHandler(onReady)
 	discord.AddHandler(onMessageCreate)
