@@ -4,7 +4,7 @@ Airhorn is an example implementation of the [Discord API](https://discordapp.com
 This fork strips the original project of its server and redis, preserving only the bot.
 
 ## Usage
-Airhorn Bot has two components, a bot client that handles the playing of loyal airhorns. Once added to your server, airhorn bot can be summoned by running `!airhorn`.
+Airhorn Bot is a simple client that handles the playing of loyal airhorns. Once added to your server, airhorn bot can be summoned by running `!airhorn`.
 
 ### Running the Bot
 
