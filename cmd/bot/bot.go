@@ -320,6 +320,9 @@ func createPlay(user *discordgo.User, guild *discordgo.Guild, coll *SoundCollect
 		}).Warning("Failed to find channel to play sound in")
 		return nil
 	}
+	if channel.ID == guild.AfkChannelID {
+		return nil
+	}
 
 	// Create the play
 	play := &Play{
@@ -383,7 +386,6 @@ func runPlayer(guildId string) {
 			break
 		}
 		m.Unlock()
-
 
 		// If we need to change channels, do that now
 		if vc != nil && vc.ChannelID != play.ChannelID {
